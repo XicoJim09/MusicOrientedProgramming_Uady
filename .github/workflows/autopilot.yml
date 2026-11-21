@@ -1,0 +1,16 @@
+name: ChatGPT & Codex Plugin Autopilot
+
+on:
+  push:
+    branches: [ "main" ] # Se ejecutará al hacer push a main
+  workflow_dispatch:     # Permite ejecutarlo manualmente desde un botón
+
+jobs:
+  autopilot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ChatGPT & Codex Plugin Autopilot
+        uses: imMamdouhaboammar/chatgpt-codex-plugin-autopilot@v0.8.0
