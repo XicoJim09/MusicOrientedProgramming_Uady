@@ -1,5 +1,6 @@
 package com.audy;
 
+import com.audy.api.DeezerAPIClient;
 import com.audy.api.MusicBrainzAPIClient;
 import com.audy.api.SpotifyAPIClient;
 import com.audy.controllers.RecommendationController;
@@ -11,17 +12,18 @@ import javax.swing.*;
 
 /**
  * AUDY application entry point.
- * Initialises the modular API clients (RNF-05), the discovery engine,
- * and launches the Swing UI with MVC controllers (F4, F5).
+ * Initialises the modular API clients (RNF-05) with Deezer as default,
+ * the discovery engine, and launches the Swing UI with MVC controllers (F4, F5).
  */
 public class Main {
     public static void main(String[] args) {
         // Modular API clients (RNF-05)
-        SpotifyAPIClient spotifyApi       = new SpotifyAPIClient();
+        DeezerAPIClient deezerApi           = new DeezerAPIClient();
+        SpotifyAPIClient spotifyApi         = new SpotifyAPIClient();
         MusicBrainzAPIClient musicBrainzApi = new MusicBrainzAPIClient();
 
-        // Service layer
-        DiscoveryEngine engine = new DiscoveryEngine(spotifyApi, musicBrainzApi);
+        // Service layer (100% dynamic recommendations via Deezer API)
+        DiscoveryEngine engine = new DiscoveryEngine(deezerApi, spotifyApi, musicBrainzApi);
 
         // Launch UI on Event Dispatch Thread
         SwingUtilities.invokeLater(() -> {

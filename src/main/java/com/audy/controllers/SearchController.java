@@ -43,24 +43,32 @@ public class SearchController {
         mainFrame.getMatchesPanel().setOnBackHome(this::goHome);
     }
 
-    // RF-02: Predictive suggestions with 300 ms client-side debounce (RNF-04).
+    private int currentPredictSeq = 0;
+
+    // RF-02: Predictive suggestions with 350 ms client-side debounce (RNF-04).
     private void handlePredictiveSearch(String partialText) {
         if (debounceTimer != null && debounceTimer.isRunning()) {
             debounceTimer.stop();
         }
-        debounceTimer = new Timer(300, e -> {
+        final int seq = ++currentPredictSeq;
+        debounceTimer = new Timer(350, e -> {
             new SwingWorker<List<Track>, Void>() {
                 @Override protected List<Track> doInBackground() throws Exception {
                     return engine.getPredictiveSuggestions(partialText);
                 }
                 @Override protected void done() {
                     try {
+                        if (seq != currentPredictSeq) return; // Stale query, discard
                         List<Track> suggestions = get();
                         if (suggestions != null && !suggestions.isEmpty()) {
                             mainFrame.getHomePanel().showPredictions(suggestions);
+                        } else {
+                            mainFrame.getHomePanel().hidePredictions();
                         }
                     } catch (Exception ex) {
-                        mainFrame.getHomePanel().showPredictError(extractMessage(ex));
+                        if (seq == currentPredictSeq) {
+                            mainFrame.getHomePanel().showPredictError(extractMessage(ex));
+                        }
                     }
                 }
             }.execute();
@@ -71,6 +79,8 @@ public class SearchController {
 
     // RF-03: Full search when user presses Enter.
     private void handleSearch(String query) {
+        if (debounceTimer != null) debounceTimer.stop();
+        mainFrame.getHomePanel().hidePredictions();
         mainFrame.showLoading("Searching for \u201C" + query + "\u201D\u2026");
 
         new SwingWorker<List<Track>, Void>() {
@@ -90,11 +100,15 @@ public class SearchController {
 
     // RF-04: Track selected from predictive suggestions.
     private void handleTrackFromPredict(Track track) {
+        if (debounceTimer != null) debounceTimer.stop();
+        mainFrame.getHomePanel().hidePredictions();
         recoController.generateRecommendations(track);
     }
 
     // RF-04: Track selected from search results.
     private void handleTrackFromMatches(Track track) {
+        if (debounceTimer != null) debounceTimer.stop();
+        mainFrame.getHomePanel().hidePredictions();
         recoController.generateRecommendations(track);
     }
 

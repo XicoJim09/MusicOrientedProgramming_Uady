@@ -121,11 +121,28 @@ public class RecommendationsPanel extends JPanel {
         info.add(UIHelper.createLabel(track.getTitle(), UIHelper.BODY_FONT, UIHelper.TEXT_PRIMARY));
         info.add(UIHelper.createLabel(track.getArtist().getName(), UIHelper.SMALL_FONT, UIHelper.TEXT_SECONDARY));
 
+        JPanel rightCol = UIHelper.createPanel(UIHelper.BG_SECONDARY);
+        rightCol.setLayout(new FlowLayout(FlowLayout.RIGHT, 12, 0));
+
         JLabel pop = UIHelper.createLabel("Pop: " + track.getPopularity(), UIHelper.SMALL_FONT, UIHelper.ACCENT);
+
+        JButton openBtn = new JButton("Open \u2197");
+        openBtn.setFont(UIHelper.SMALL_FONT);
+        openBtn.setBackground(UIHelper.ACCENT);
+        openBtn.setForeground(Color.WHITE);
+        openBtn.setFocusPainted(false);
+        openBtn.setBorderPainted(false);
+        openBtn.setOpaque(true);
+        openBtn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        openBtn.setPreferredSize(new Dimension(80, 26));
+        openBtn.addActionListener(e -> DetailPanel.openBrowserUrl(this, track.getPlayerUrl()));
+
+        rightCol.add(pop);
+        rightCol.add(openBtn);
 
         card.add(num, BorderLayout.WEST);
         card.add(info, BorderLayout.CENTER);
-        card.add(pop, BorderLayout.EAST);
+        card.add(rightCol, BorderLayout.EAST);
 
         card.addMouseListener(new java.awt.event.MouseAdapter() {
             public void mouseClicked(java.awt.event.MouseEvent e) {
