@@ -1,0 +1,13 @@
+# AUDY - API Configuration
+# Copy this file without the ".example" in the name and set your Spotify credentials:
+#   - Windows PowerShell: $env:SPOTIFY_CLIENT_ID = "your_id"
+#   - Linux/macOS: export SPOTIFY_CLIENT_ID="your_id"
+
+# Spotify Web API (required)
+# Get credentials at: https://developer.spotify.com/dashboard
+SPOTIFY_CLIENT_ID=your_client_id_here
+SPOTIFY_CLIENT_SECRET=your_client_secret_here
+
+# MusicBrainz API (no credentials needed)
+# Rate limit: 1 request per second (enforced automatically)
+# User-Agent: AudyDiscoverySystem/1.0

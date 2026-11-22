@@ -2,7 +2,10 @@ package com.audy.api;
 
 import com.audy.models.Artist;
 import com.audy.models.Track;
+import com.audy.util.JsonParser;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -13,10 +16,14 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Map;
+import java.util.Properties;
 
-// Mmodule for Spotify Web API communication (RNF-05).
+/**
+ * Module for Spotify Web API communication (RNF-05).
+ * Handles authentication, search, track/artist metadata, and recommendations.
+ * Token auto-refresh on 401 responses.
+ */
 public class SpotifyAPIClient {
     private static final String AUTH_URL = "https://accounts.spotify.com/api/token";
     private static final String API_BASE_URL = "https://api.spotify.com/v1";
@@ -35,13 +42,35 @@ public class SpotifyAPIClient {
     }
 
     public SpotifyAPIClient() {
-        this(
-            System.getenv().getOrDefault("SPOTIFY_CLIENT_ID", "YOUR_CLIENT_ID"),
-            System.getenv().getOrDefault("SPOTIFY_CLIENT_SECRET", "YOUR_CLIENT_SECRET")
-        );
+        this(resolveCredential("SPOTIFY_CLIENT_ID"), resolveCredential("SPOTIFY_CLIENT_SECRET"));
     }
 
+    private static String resolveCredential(String key) {
+        // 1. Try reading from config.properties if it exists
+        File configFile = new File("config.properties");
+        if (configFile.exists() && configFile.isFile()) {
+            try (FileInputStream fis = new FileInputStream(configFile)) {
+                Properties props = new Properties();
+                props.load(fis);
+                String val = props.getProperty(key);
+                if (val != null && !val.trim().isEmpty() && !val.contains("your_") && !val.contains("AQUI")) {
+                    return val.trim();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        // 2. Fallback to System environment variables
+        return System.getenv().getOrDefault(key, "").trim();
+    }
+
+    // Authenticates with Spotify using Client Credentials flow.
     public void authenticate() throws APIClientException {
+        if (clientId.isEmpty() || clientSecret.isEmpty()) {
+            throw new APIClientException(
+                "Spotify credentials not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.",
+                null, false
+            );
+        }
         try {
             String credentials = clientId + ":" + clientSecret;
             String encodedAuth = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
@@ -62,7 +91,8 @@ public class SpotifyAPIClient {
                 );
             }
 
-            this.accessToken = extractJsonString(response.body(), "access_token");
+            Map<String, Object> json = JsonParser.parseObject(response.body());
+            this.accessToken = JsonParser.getString(json, "access_token");
         } catch (APIClientException e) {
             throw e;
         } catch (Exception e) {
@@ -76,164 +106,211 @@ public class SpotifyAPIClient {
         }
     }
 
-    // Searches tracks on Spotify (RF-02 predictive suggestions & RF-03 Enter search).
-    public List<Track> searchTracks(String query, int limit) throws APIClientException {
-        ensureAuthenticated();
+    // Centralized GET helper with automatic token refresh on 401 (RNF-02).
+    private String apiGet(String url) throws APIClientException {
         try {
-            String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
-            String url = API_BASE_URL + "/search?q=" + encodedQuery + "&type=track&limit=" + limit;
-
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("Authorization", "Bearer " + accessToken)
                     .GET()
                     .build();
-
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                throw new APIClientException("Spotify search error: HTTP " + response.statusCode(), null, true);
+
+            // Token expired — re-authenticate and retry once
+            if (response.statusCode() == 401) {
+                this.accessToken = null;
+                ensureAuthenticated();
+                request = HttpRequest.newBuilder()
+                        .uri(URI.create(url))
+                        .header("Authorization", "Bearer " + accessToken)
+                        .GET()
+                        .build();
+                response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             }
 
-            return parseTracksFromSearchJson(response.body());
+            if (response.statusCode() != 200) {
+                String errorDetail = response.body();
+                try {
+                    Map<String, Object> errObj = JsonParser.parseObject(response.body());
+                    Map<String, Object> error = JsonParser.getObject(errObj, "error");
+                    String msg = JsonParser.getString(error, "message");
+                    if (!msg.isEmpty()) {
+                        errorDetail = msg;
+                    }
+                } catch (Exception ignored) {}
+                throw new APIClientException("Spotify API error: HTTP " + response.statusCode() + " (" + errorDetail + ")", null, true);
+            }
+            return response.body();
         } catch (APIClientException e) {
             throw e;
         } catch (Exception e) {
-            throw new APIClientException("Connection failed while searching tracks on Spotify.", e, true);
+            throw new APIClientException("Network error while calling Spotify API.", e, true);
         }
     }
 
-    // Retrieves detailed metadata for a single track (RF-05, RF-09).
+    // Searches tracks on Spotify (RF-02 predictive suggestions & RF-03 Enter search).
+    // Automatically paginates in batches of <= 10 to satisfy Spotify's recent API limit restriction.
+    public List<Track> searchTracks(String query, int limit) throws APIClientException {
+        ensureAuthenticated();
+        String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        List<Track> allTracks = new ArrayList<>();
+        int remaining = limit;
+        int offset = 0;
+
+        while (remaining > 0 && offset < 50) {
+            int currentLimit = Math.min(remaining, 10);
+            String url = API_BASE_URL + "/search?q=" + encodedQuery + "&type=track&limit=" + currentLimit + "&offset=" + offset;
+            String body = apiGet(url);
+
+            Map<String, Object> json = JsonParser.parseObject(body);
+            Map<String, Object> tracks = JsonParser.getObject(json, "tracks");
+            List<Object> items = JsonParser.getArray(tracks, "items");
+            List<Track> pageTracks = parseTrackItems(items);
+            if (pageTracks.isEmpty()) break;
+
+            allTracks.addAll(pageTracks);
+            offset += pageTracks.size();
+            remaining -= pageTracks.size();
+            if (pageTracks.size() < currentLimit) break;
+        }
+
+        return allTracks;
+    }
+
+    // Retrieves detailed metadata for a single track by ID (RF-05, RF-09).
+    // FIX: uses the direct /tracks/{id} endpoint instead of a search query.
     public Track getTrackMetadata(String trackId) throws APIClientException {
-        List<Track> tracks = searchTracks("spotifysong:" + trackId, 1);
-        return tracks.isEmpty() ? null : tracks.get(0);
+        ensureAuthenticated();
+        String url = API_BASE_URL + "/tracks/" + trackId;
+        String body = apiGet(url);
+
+        Map<String, Object> json = JsonParser.parseObject(body);
+        return parseTrackObject(json);
     }
 
     // Retrieves artist information and their associated genres (RF-06).
     public Artist getArtistMetadata(String artistId) throws APIClientException {
         ensureAuthenticated();
-        try {
-            String url = API_BASE_URL + "/artists/" + artistId;
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Authorization", "Bearer " + accessToken)
-                    .GET()
-                    .build();
+        String url = API_BASE_URL + "/artists/" + artistId;
+        String body = apiGet(url);
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                throw new APIClientException("Failed to fetch artist metadata: HTTP " + response.statusCode(), null, true);
-            }
-
-            String name = extractJsonString(response.body(), "name");
-            List<String> genres = extractJsonArrayStrings(response.body(), "genres");
-            return new Artist(artistId, name, genres);
-        } catch (APIClientException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new APIClientException("Network error while retrieving artist metadata.", e, true);
-        }
+        Map<String, Object> json = JsonParser.parseObject(body);
+        String name = JsonParser.getString(json, "name");
+        List<String> genres = extractStringList(JsonParser.getArray(json, "genres"));
+        return new Artist(artistId, name, genres);
     }
 
     // Fetches recommendations by genre and popularity bounds (RF-07, RF-08).
-    // Includes an automatic fallback to genre-based search if /recommendations doesn't work.
+    // Includes automatic fallback to genre-based search if /recommendations fails.
     public List<Track> fetchRecommendations(List<String> seedGenres, int minPop, int maxPop, int limit) throws APIClientException {
         ensureAuthenticated();
         if (seedGenres == null || seedGenres.isEmpty()) {
             return new ArrayList<>();
         }
 
+        List<String> maxFiveSeeds = seedGenres.subList(0, Math.min(5, seedGenres.size()));
+        String joinedGenres = URLEncoder.encode(String.join(",", maxFiveSeeds), StandardCharsets.UTF_8);
+
+        String url = String.format(
+                "%s/recommendations?seed_genres=%s&min_popularity=%d&max_popularity=%d&limit=%d",
+                API_BASE_URL, joinedGenres, minPop, maxPop, limit
+        );
+
+        // Try the recommendations endpoint first
         try {
-            List<String> maxFiveSeeds = seedGenres.subList(0, Math.min(5, seedGenres.size()));
-            String joinedGenres = URLEncoder.encode(String.join(",", maxFiveSeeds), StandardCharsets.UTF_8);
+            String body = apiGet(url);
+            Map<String, Object> json = JsonParser.parseObject(body);
+            List<Object> tracks = JsonParser.getArray(json, "tracks");
+            List<Track> result = parseTrackItems(tracks);
+            if (!result.isEmpty()) return result;
+        } catch (Exception ignored) {
+            // Fall through to genre-based search fallback
+        }
 
-            String url = String.format(
-                    "%s/recommendations?seed_genres=%s&min_popularity=%d&max_popularity=%d&limit=%d",
-                    API_BASE_URL, joinedGenres, minPop, maxPop, limit
-            );
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Authorization", "Bearer " + accessToken)
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 200) {
-                return parseTracksFromSearchJson(response.body());
+        // Fallback: search by genre and filter by popularity
+        List<Track> fallbackResults = new ArrayList<>();
+        for (String genre : maxFiveSeeds) {
+            List<Track> genreTracks = new ArrayList<>();
+            try {
+                genreTracks = searchTracks("genre:\"" + genre + "\"", 20);
+            } catch (Exception ex) {
+                try {
+                    genreTracks = searchTracks(genre, 20);
+                } catch (Exception ignored) {}
             }
-
-            // Fallback
-            List<Track> fallbackResults = new ArrayList<>();
-            for (String genre : maxFiveSeeds) {
-                List<Track> genreTracks = searchTracks("genre:\"" + genre + "\"", 25);
-                for (Track t : genreTracks) {
-                    if (t.getPopularity() >= minPop && t.getPopularity() <= maxPop) {
-                        fallbackResults.add(t);
-                    }
+            for (Track t : genreTracks) {
+                if (t.getPopularity() >= minPop && t.getPopularity() <= maxPop) {
+                    fallbackResults.add(t);
                 }
-                if (fallbackResults.size() >= limit) break;
             }
-            return fallbackResults;
-
-        } catch (APIClientException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new APIClientException("Error generating recommendations from Spotify.", e, true);
+            if (fallbackResults.size() >= limit) break;
         }
+        return fallbackResults;
     }
 
-    // --- JSON Extraction Helpers ---
+    // --- JSON Parsing Helpers (using JsonParser) ---
 
-    private String extractJsonString(String json, String key) {
-        Pattern pattern = Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
-        Matcher matcher = pattern.matcher(json);
-        return matcher.find() ? matcher.group(1) : "";
-    }
-
-    private List<String> extractJsonArrayStrings(String json, String arrayKey) {
-        List<String> list = new ArrayList<>();
-        Pattern blockPattern = Pattern.compile("\"" + arrayKey + "\"\\s*:\\s*\\[(.*?)\\]", Pattern.DOTALL);
-        Matcher blockMatcher = blockPattern.matcher(json);
-        if (blockMatcher.find()) {
-            Matcher itemMatcher = Pattern.compile("\"([^\"]+)\"").matcher(blockMatcher.group(1));
-            while (itemMatcher.find()) {
-                list.add(itemMatcher.group(1));
-            }
-        }
-        return list;
-    }
-
-    private List<Track> parseTracksFromSearchJson(String json) {
+    @SuppressWarnings("unchecked")
+    private List<Track> parseTrackItems(List<Object> items) {
         List<Track> tracks = new ArrayList<>();
-        // Splits track items by "type" : "track" blocks
-        String[] blocks = json.split("\"type\"\\s*:\\s*\"track\"");
-        for (int i = 0; i < blocks.length - 1; i++) {
-            String block = blocks[i];
-            String id = extractLastMatch(block, "\"id\"\\s*:\\s*\"([^\"]+)\"");
-            String title = extractLastMatch(block, "\"name\"\\s*:\\s*\"([^\"]+)\"");
-            String popStr = extractFirstMatch(blocks[i + 1], "\"popularity\"\\s*:\\s*(\\d+)");
-            int popularity = popStr.isEmpty() ? 50 : Integer.parseInt(popStr);
-            String previewUrl = extractFirstMatch(blocks[i + 1], "\"preview_url\"\\s*:\\s*\"([^\"]+)\"");
-            String playerUrl = "https://open.spotify.com/track/" + id;
-
-            Artist artist = new Artist("unknown_artist_id", "Spotify Artist", new ArrayList<>());
-            if (!id.isEmpty() && !title.isEmpty()) {
-                tracks.add(new Track(id, title, artist, new ArrayList<>(), popularity, previewUrl, playerUrl, ""));
+        for (Object item : items) {
+            if (item instanceof Map) {
+                Track track = parseTrackObject((Map<String, Object>) item);
+                if (track != null) {
+                    tracks.add(track);
+                }
             }
         }
         return tracks;
     }
 
-    private String extractLastMatch(String text, String regex) {
-        Matcher m = Pattern.compile(regex).matcher(text);
-        String last = "";
-        while (m.find()) last = m.group(1);
-        return last;
+    @SuppressWarnings("unchecked")
+    private Track parseTrackObject(Map<String, Object> trackObj) {
+        String id = JsonParser.getString(trackObj, "id");
+        String name = JsonParser.getString(trackObj, "name");
+        int popularity = JsonParser.getInt(trackObj, "popularity", 50);
+
+        // FIX: Extract real artist info from the "artists" array
+        Artist artist = new Artist("unknown", "Unknown Artist", new ArrayList<>());
+        List<Object> artists = JsonParser.getArray(trackObj, "artists");
+        if (!artists.isEmpty() && artists.get(0) instanceof Map) {
+            Map<String, Object> artistObj = (Map<String, Object>) artists.get(0);
+            String artistId = JsonParser.getString(artistObj, "id");
+            String artistName = JsonParser.getString(artistObj, "name");
+            artist = new Artist(artistId, artistName, new ArrayList<>());
+        }
+
+        // Extract preview URL (may be null in Spotify's response)
+        String previewUrl = "";
+        Object previewObj = trackObj.get("preview_url");
+        if (previewObj instanceof String) {
+            previewUrl = (String) previewObj;
+        }
+
+        // Build Spotify player URL
+        String playerUrl = id.isEmpty() ? "" : "https://open.spotify.com/track/" + id;
+
+        // Extract album cover image
+        String coverImage = "";
+        Map<String, Object> album = JsonParser.getObject(trackObj, "album");
+        if (!album.isEmpty()) {
+            List<Object> images = JsonParser.getArray(album, "images");
+            if (!images.isEmpty() && images.get(0) instanceof Map) {
+                coverImage = JsonParser.getString((Map<String, Object>) images.get(0), "url");
+            }
+        }
+
+        if (id.isEmpty() || name.isEmpty()) return null;
+        return new Track(id, name, artist, new ArrayList<>(), popularity, previewUrl, playerUrl, coverImage);
     }
 
-    private String extractFirstMatch(String text, String regex) {
-        Matcher m = Pattern.compile(regex).matcher(text);
-        return m.find() ? m.group(1) : "";
+    private List<String> extractStringList(List<Object> list) {
+        List<String> result = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof String) {
+                result.add((String) item);
+            }
+        }
+        return result;
     }
 }

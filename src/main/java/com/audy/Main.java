@@ -1,34 +1,42 @@
 package com.audy;
 
-import com.audy.api.APIClientException;
 import com.audy.api.MusicBrainzAPIClient;
-import java.util.List;
+import com.audy.api.SpotifyAPIClient;
+import com.audy.controllers.RecommendationController;
+import com.audy.controllers.SearchController;
+import com.audy.services.DiscoveryEngine;
+import com.audy.views.MainFrame;
 
+import javax.swing.*;
+
+/**
+ * AUDY application entry point.
+ * Initialises the modular API clients (RNF-05), the discovery engine,
+ * and launches the Swing UI with MVC controllers (F4, F5).
+ */
 public class Main {
     public static void main(String[] args) {
-        System.out.println("=== AUDY BACKEND & API CONNECTION TEST ===");
+        // Modular API clients (RNF-05)
+        SpotifyAPIClient spotifyApi       = new SpotifyAPIClient();
+        MusicBrainzAPIClient musicBrainzApi = new MusicBrainzAPIClient();
 
-        MusicBrainzAPIClient musicBrainz = new MusicBrainzAPIClient();
+        // Service layer
+        DiscoveryEngine engine = new DiscoveryEngine(spotifyApi, musicBrainzApi);
 
-        try {
-            String testTrack = "Smells Like Teen Spirit";
-            String testArtist = "Nirvana";
+        // Launch UI on Event Dispatch Thread
+        SwingUtilities.invokeLater(() -> {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception ignored) {}
 
-            System.out.println("\n1. Querying MusicBrainz API for: " + testTrack + " - " + testArtist + "...");
-            List<String> tags = musicBrainz.fetchTrackTags(testTrack, testArtist);
+            MainFrame mainFrame = new MainFrame();
 
-            System.out.println("-> Extracted Genres & Subgenres (RF-07): " + tags);
+            // MVC Controllers (F5)
+            RecommendationController recoCtrl =
+                    new RecommendationController(mainFrame, engine);
+            new SearchController(mainFrame, engine, recoCtrl);
 
-            System.out.println("\n2. Fetching Raw JSON snippet for Rubric Evidence...");
-            String rawJson = musicBrainz.fetchRawRecordingJson(testTrack, testArtist);
-            System.out.println("-> JSON Response (first 400 chars):\n" + 
-                rawJson.substring(0, Math.min(400, rawJson.length())) + "...\n");
-
-            System.out.println("=== TEST COMPLETED SUCCESSFULLY (RNF-02 & RNF-05 VERIFIED) ===");
-
-        } catch (APIClientException e) {
-            System.err.println("API Error handled gracefully (RF-11): " + e.getMessage());
-            System.err.println("Can user retry? " + e.isRetryable());
-        }
+            mainFrame.setVisible(true);
+        });
     }
 }

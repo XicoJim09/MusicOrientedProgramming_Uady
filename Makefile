@@ -18,9 +18,13 @@ run: compile
 	@echo "Launching the application..."
 	$(JAVA) -cp $(OUT_DIR) $(MAIN_CLASS)
 
+test: compile
+	@echo "Running requirements verification tests..."
+	$(JAVA) -cp $(OUT_DIR) com.audy.test.RequirementsVerification
+
 clean:
 	@echo "Removing the $(OUT_DIR)/ directory..."
 	rm -rf $(OUT_DIR)
 	@echo "Cleanup completed."
 
-.PHONY: all compile run clean
+.PHONY: all compile run test clean

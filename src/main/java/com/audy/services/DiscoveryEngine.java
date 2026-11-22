@@ -56,23 +56,38 @@ public class DiscoveryEngine {
         }
 
         // RF-06: Retrieve artist metadata and genres
-        Artist fullArtist = spotifyApi.getArtistMetadata(referenceTrack.getArtist().getId());
         Set<String> seedGenres = new LinkedHashSet<>();
+        try {
+            if (referenceTrack.getArtist() != null && !referenceTrack.getArtist().getId().isEmpty()) {
+                Artist fullArtist = spotifyApi.getArtistMetadata(referenceTrack.getArtist().getId());
+                if (fullArtist != null && fullArtist.getGenres() != null) {
+                    seedGenres.addAll(fullArtist.getGenres());
+                }
+            }
+        } catch (Exception ignored) {}
 
-        if (fullArtist != null && fullArtist.getGenres() != null) {
-            seedGenres.addAll(fullArtist.getGenres());
-        }
         if (referenceTrack.getGenres() != null) {
             seedGenres.addAll(referenceTrack.getGenres());
         }
 
-        // Fallback to MusicBrainz if Spotify provides no genres for the artist/track
+        // Fallback to MusicBrainz if Spotify provides no genres for the artist/track (RNF-05, RNF-02)
         if (seedGenres.isEmpty()) {
-            List<String> fallbackTags = musicBrainzApi.fetchTrackTags(
-                    referenceTrack.getTitle(),
-                    referenceTrack.getArtist().getName()
-            );
-            seedGenres.addAll(fallbackTags);
+            try {
+                List<String> fallbackTags = musicBrainzApi.fetchTrackTags(
+                        referenceTrack.getTitle(),
+                        referenceTrack.getArtist().getName()
+                );
+                if (fallbackTags != null) {
+                    seedGenres.addAll(fallbackTags);
+                }
+            } catch (Exception mbEx) {
+                // MusicBrainz server error (503) or offline: continue gracefully (RNF-02)
+            }
+        }
+
+        // If still no genres found, use the artist name as a search seed
+        if (seedGenres.isEmpty() && referenceTrack.getArtist() != null) {
+            seedGenres.add(referenceTrack.getArtist().getName().toLowerCase());
         }
 
         // RF-07: Calculate adaptive popularity bounds based on reference track popularity
@@ -91,10 +106,22 @@ public class DiscoveryEngine {
             maxPop = 50;
         }
 
-        // Request extra tracks (limit = 30) to ensure at least 10 remain after deduplication (RNF-03)
-        List<Track> rawCandidates = spotifyApi.fetchRecommendations(
-                new ArrayList<>(seedGenres), minPop, maxPop, 30
-        );
+        // Request extra tracks to ensure at least 10 remain after deduplication (RNF-03)
+        List<Track> rawCandidates = new ArrayList<>();
+        if (!seedGenres.isEmpty()) {
+            rawCandidates.addAll(spotifyApi.fetchRecommendations(
+                    new ArrayList<>(seedGenres), minPop, maxPop, 30
+            ));
+        }
+
+        // If candidates are insufficient (e.g. Spotify returned empty genres or endpoint blocked),
+        // enrich candidates using artist search to guarantee quality recommendations
+        if (rawCandidates.size() < MIN_RECOMMENDATIONS && referenceTrack.getArtist() != null) {
+            try {
+                List<Track> artistTracks = spotifyApi.searchTracks(referenceTrack.getArtist().getName(), 20);
+                rawCandidates.addAll(artistTracks);
+            } catch (Exception ignored) {}
+        }
 
         // RNF-03: Filter out reference song and eliminate duplicates
         Set<Track> uniqueRecommendations = new LinkedHashSet<>();
@@ -104,17 +131,19 @@ public class DiscoveryEngine {
             }
         }
 
-        // RNF-03: If fewer than 10 results, widen the popularity filter to fetch additional candidates
+        // RNF-03: If fewer than 10 results, widen search to fetch additional candidates
         if (uniqueRecommendations.size() < MIN_RECOMMENDATIONS) {
-            List<Track> extraCandidates = spotifyApi.fetchRecommendations(
-                    new ArrayList<>(seedGenres), 5, 85, 30
-            );
-            for (Track extra : extraCandidates) {
-                if (!extra.equals(referenceTrack)) {
-                    uniqueRecommendations.add(extra);
-                }
-                if (uniqueRecommendations.size() >= MIN_RECOMMENDATIONS) {
-                    break;
+            if (!seedGenres.isEmpty()) {
+                List<Track> extraCandidates = spotifyApi.fetchRecommendations(
+                        new ArrayList<>(seedGenres), 5, 95, 30
+                );
+                for (Track extra : extraCandidates) {
+                    if (!extra.equals(referenceTrack)) {
+                        uniqueRecommendations.add(extra);
+                    }
+                    if (uniqueRecommendations.size() >= MIN_RECOMMENDATIONS) {
+                        break;
+                    }
                 }
             }
         }
